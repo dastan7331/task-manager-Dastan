@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Task Manager</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1d2733;--mute:#66707c;--line:#d9dee4;--acc:#0b6e66;--accink:#fff;--bad:#b42318;--ok:#0b6e66;--soft:#e6f2f0;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#10161d;--card:#18212b;--ink:#e8edf2;--mute:#97a3b0;--line:#2b3744;--acc:#3cb8ab;--accink:#06201d;--bad:#ff8a7a;--ok:#3cb8ab;--soft:#16312e}}
+:root[data-theme="dark"]{--bg:#10161d;--card:#18212b;--ink:#e8edf2;--mute:#97a3b0;--line:#2b3744;--acc:#3cb8ab;--accink:#06201d;--bad:#ff8a7a;--ok:#3cb8ab;--soft:#16312e}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{padding:20px 16px 0;max-width:980px;margin:0 auto}
+h1{margin:0 0 2px;font-size:22px}
+.sub{color:var(--mute);margin:0 0 14px}
+nav{display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:10px}
+nav button{border:1px solid var(--line);background:var(--card);color:var(--ink);padding:7px 14px;border-radius:8px;cursor:pointer;font:inherit}
+nav button[aria-current="true"]{background:var(--acc);color:var(--accink);border-color:var(--acc)}
+main{max-width:980px;margin:0 auto;padding:16px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:16px}
+h2{font-size:16px;margin:0 0 10px}
+form{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;align-items:end}
+label{display:flex;flex-direction:column;gap:3px;font-size:13px;color:var(--mute)}
+input,select{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:7px 9px;min-width:0}
+input:focus,select:focus,button:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.btn{background:var(--acc);color:var(--accink);border:0;border-radius:6px;padding:8px 14px;cursor:pointer;font:inherit}
+.btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+.btn.sm{padding:3px 9px;font-size:13px}
+.btn.del{background:transparent;color:var(--bad);border:1px solid var(--line)}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:560px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:13px;color:var(--mute);font-weight:600}
+.msg{min-height:20px;margin:8px 0 0;font-size:13px}
+.msg.err{color:var(--bad)}.msg.ok{color:var(--ok)}
+.tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;background:var(--soft);color:var(--ink)}
+.bar{height:8px;background:var(--line);border-radius:4px;min-width:90px}.bar i{display:block;height:100%;background:var(--acc);border-radius:4px}
+.empty{color:var(--mute);padding:10px 0}
+.tools{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.late{color:var(--bad)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Task Manager</h1>
+  <p class="sub">Веб-версия учёта задач: данные берутся из базы H2 через Java-сервер (localhost).</p>
+  <nav id="nav"></nav>
+</header>
+<main id="main"></main>
+<script>
+const STATUSES = ['TODO', 'IN_PROGRESS', 'DONE'];
+const VIEWS = {users: 'Пользователи', projects: 'Проекты', tasks: 'Задачи', reports: 'Отчёты'};
+let db = {users: [], projects: [], categories: [], tasks: []}, rep = null;
+let view = 'users', editing = null, msg = {text: '', type: ''}, q = '', qStatus = '';
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+const byId = (list, id) => list.find(x => x.id === Number(id));
+const today = () => new Date().toISOString().slice(0, 10);
+const opts = (list, sel, blank) => (blank ? '<option value="">—</option>' : '') + list.map(x => `<option value="${x.id}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)}</option>`).join('');
+const setMsg = (text, type) => { msg = {text, type}; };
+const msgHtml = () => `<p class="msg ${msg.type}" role="status">${esc(msg.text)}</p>`;
+const val = id => document.getElementById(id).value;
+async function api(method, url, data) {
+  const opt = {method};
+  if (data) { opt.body = new URLSearchParams(data); opt.headers = {'Content-Type': 'application/x-www-form-urlencoded'}; }
+  const res = await fetch(url, opt);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || 'Ошибка запроса');
+  return body;
+}
+async function loadAll() {
+  [db.users, db.projects, db.categories] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/projects'), api('GET', '/api/categories')]);
+  await loadTasks(false);
+  if (view === 'reports') rep = await api('GET', '/api/reports');
+  render();
+}
+async function loadTasks(draw = true) {
+  db.tasks = await api('GET', '/api/tasks?q=' + encodeURIComponent(q) + '&status=' + encodeURIComponent(qStatus));
+  if (draw) render();
+}
+async function act(fn, okText) {
+  try { await fn(); setMsg(okText, 'ok'); editing = null; await loadAll(); }
+  catch (e) { setMsg(e.message, 'err'); render(); }
+}
+
+async function go(v) { view = v; editing = null; setMsg('', ''); await loadAll(); }
+function edit(id) { editing = id; setMsg('', ''); render(); }
+function cancel() { editing = null; render(); }
+function usersView() {
+  const u = editing ? byId(db.users, editing) : null;
+  const rows = db.users.map(x => `<tr><td>${x.id}</td><td>${esc(x.name)}</td><td>${esc(x.email)}</td>
+    <td><button class="btn ghost sm" onclick="edit(${x.id})">Изменить</button> <button class="btn del sm" onclick="delUser(${x.id})">Удалить</button></td></tr>`).join('');
+  return `<div class="panel"><h2>${u ? 'Изменить пользователя' : 'Добавить пользователя'}</h2>
+  <form onsubmit="saveUser(event)">
+    <label>Имя<input id="uname" maxlength="100" value="${esc(u?.name)}"></label>
+    <label>Email<input id="uemail" maxlength="150" value="${esc(u?.email)}"></label>
+    <div><button class="btn">${u ? 'Сохранить' : 'Добавить'}</button> ${u ? '<button type="button" class="btn ghost" onclick="cancel()">Отмена</button>' : ''}</div>
+  </form>${msgHtml()}</div>
+  <div class="panel scroll"><h2>Пользователи</h2>${db.users.length ? `<table><tr><th>ID</th><th>Имя</th><th>Email</th><th></th></tr>${rows}</table>` : '<p class="empty">Пользователей пока нет. Добавьте первого.</p>'}</div>`;
+}
+function saveUser(e) {
+  e.preventDefault();
+  const data = {name: val('uname'), email: val('uemail')};
+  act(() => editing ? api('PUT', '/api/users/' + editing, data) : api('POST', '/api/users', data), editing ? 'Пользователь обновлён.' : 'Пользователь добавлен.');
+}
+function delUser(id) {
+  if (confirm('Удалить пользователя? Его проекты и задачи этих проектов тоже удалятся.')) act(() => api('DELETE', '/api/users/' + id), 'Пользователь удалён.');
+}
+function projectsView() {
+  const p = editing ? byId(db.projects, editing) : null;
+  const rows = db.projects.map(x => `<tr><td>${x.id}</td><td>${esc(x.name)}</td><td>${esc(x.ownerName)}</td>
+    <td><button class="btn ghost sm" onclick="edit(${x.id})">Изменить</button> <button class="btn del sm" onclick="delProject(${x.id})">Удалить</button></td></tr>`).join('');
+  return `<div class="panel"><h2>${p ? 'Изменить проект' : 'Добавить проект'}</h2>
+  <form onsubmit="saveProject(event)">
+    <label>Название<input id="pname" maxlength="100" value="${esc(p?.name)}"></label>
+    <label>Владелец<select id="powner">${opts(db.users, p?.ownerId)}</select></label>
+    <div><button class="btn">${p ? 'Сохранить' : 'Добавить'}</button> ${p ? '<button type="button" class="btn ghost" onclick="cancel()">Отмена</button>' : ''}</div>
+  </form>${msgHtml()}</div>
+  <div class="panel scroll"><h2>Проекты</h2>${db.projects.length ? `<table><tr><th>ID</th><th>Название</th><th>Владелец</th><th></th></tr>${rows}</table>` : '<p class="empty">Проектов пока нет.</p>'}</div>`;
+}
+function saveProject(e) {
+  e.preventDefault();
+  const data = {name: val('pname'), ownerId: val('powner')};
+  act(() => editing ? api('PUT', '/api/projects/' + editing, data) : api('POST', '/api/projects', data), editing ? 'Проект обновлён.' : 'Проект добавлен.');
+}
+function delProject(id) {
+  if (confirm('Удалить проект вместе со всеми его задачами?')) act(() => api('DELETE', '/api/projects/' + id), 'Проект удалён.');
+}
+function tasksView() {
+  const t = editing ? byId(db.tasks, editing) : null;
+  const rows = db.tasks.map(x => `<tr><td>${x.id}</td><td>${esc(x.title)}</td><td><span class="tag">${x.status}</span></td><td>${x.priority}</td>
+    <td class="${x.dueDate && x.dueDate < today() && x.status !== 'DONE' ? 'late' : ''}">${esc(x.dueDate || '-')}</td><td>${esc(x.projectName)}</td><td>${esc(x.assigneeName || '-')}</td><td>${esc(x.categoryName || '-')}</td>
+    <td><button class="btn ghost sm" onclick="edit(${x.id})">Изменить</button> <button class="btn del sm" onclick="delTask(${x.id})">Удалить</button></td></tr>`).join('');
+  return `<div class="panel"><h2>${t ? 'Изменить задачу' : 'Добавить задачу'}</h2>
+  <form onsubmit="saveTask(event)">
+    <label>Название<input id="ttitle" maxlength="150" value="${esc(t?.title)}"></label>
+    <label>Статус<select id="tstatus">${STATUSES.map(s => `<option ${t?.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+    <label>Приоритет (1–5)<input id="tprio" type="number" min="1" max="5" value="${t?.priority ?? 3}"></label>
+    <label>Срок<input id="tdue" type="date" value="${esc(t?.dueDate)}"></label>
+    <label>Проект<select id="tproj">${opts(db.projects, t?.projectId)}</select></label>
+    <label>Исполнитель<select id="tuser">${opts(db.users, t?.assigneeId, true)}</select></label>
+    <label>Категория<select id="tcat">${opts(db.categories, t?.categoryId, true)}</select></label>
+    <div><button class="btn">${t ? 'Сохранить' : 'Добавить'}</button> ${t ? '<button type="button" class="btn ghost" onclick="cancel()">Отмена</button>' : ''}</div>
+  </form>${msgHtml()}</div>
+  <div class="panel"><h2>Поиск и список задач</h2>
+  <div class="tools">
+    <label>Часть названия<input id="q" value="${esc(q)}" oninput="q=this.value;loadTasks()" placeholder="например, login"></label>
+    <label>Статус<select onchange="qStatus=this.value;loadTasks()"><option value="">Все</option>${STATUSES.map(s => `<option ${qStatus === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+  </div>
+  <div class="scroll">${db.tasks.length ? `<table><tr><th>ID</th><th>Название</th><th>Статус</th><th>Приоритет</th><th>Срок</th><th>Проект</th><th>Исполнитель</th><th>Категория</th><th></th></tr>${rows}</table>` : '<p class="empty">Ничего не найдено.</p>'}</div></div>`;
+}
+function saveTask(e) {
+  e.preventDefault();
+  const data = {title: val('ttitle'), status: val('tstatus'), priority: val('tprio'), dueDate: val('tdue'), projectId: val('tproj'), assigneeId: val('tuser'), categoryId: val('tcat')};
+  act(() => editing ? api('PUT', '/api/tasks/' + editing, data) : api('POST', '/api/tasks', data), editing ? 'Задача обновлена.' : 'Задача добавлена.');
+}
+function delTask(id) {
+  if (confirm('Удалить задачу?')) act(() => api('DELETE', '/api/tasks/' + id), 'Задача удалена.');
+}
+function reportsView() {
+  if (!rep) return '<p class="empty">Загрузка…</p>';
+  const proj = rep.projects.map(p => `<tr><td>${esc(p.name)}</td><td>${p.total}</td><td>${p.done}</td><td><div class="bar"><i style="width:${p.percent}%"></i></div>${p.percent}%</td></tr>`).join('');
+  const usr = rep.users.map(u => `<tr><td>${esc(u.name)}</td><td>${u.total}</td><td>${u.avgPriority}</td><td class="${u.overdue ? 'late' : ''}">${u.overdue}</td></tr>`).join('');
+  return `<div class="panel scroll"><h2>Прогресс по проектам</h2><table><tr><th>Проект</th><th>Задач</th><th>Выполнено</th><th>Готово</th></tr>${proj}</table></div>
+  <div class="panel scroll"><h2>Нагрузка по пользователям</h2><table><tr><th>Пользователь</th><th>Задач</th><th>Средний приоритет</th><th>Просрочено</th></tr>${usr}</table></div>`;
+}
+
+function render() {
+  document.getElementById('nav').innerHTML = Object.entries(VIEWS).map(([k, v]) => `<button onclick="go('${k}')" ${k === view ? 'aria-current="true"' : ''}>${v}</button>`).join('');
+  const keepQ = view === 'tasks' && document.activeElement && document.activeElement.id === 'q';
+  document.getElementById('main').innerHTML = {users: usersView, projects: projectsView, tasks: tasksView, reports: reportsView}[view]();
+  if (keepQ) { const el = document.getElementById('q'); el.focus(); el.setSelectionRange(q.length, q.length); }
+}
+loadAll().catch(e => { document.getElementById('main').innerHTML = '<p class="msg err">Нет связи с сервером. Запустите WebMain в IntelliJ и откройте http://localhost:8080</p>'; });
+</script>
+</body>
+</html>
